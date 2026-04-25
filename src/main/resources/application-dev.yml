@@ -1,0 +1,11 @@
+# application-dev.yml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/taskmanagerDB
+    username: anis
+    password: anis1234
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
