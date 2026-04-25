@@ -17,7 +17,9 @@ import com.app.taskmanager.dto.UpdateTaskRequest;
 import com.app.taskmanager.entity.Status;
 import com.app.taskmanager.entity.Task;
 import com.app.taskmanager.entity.User;
-import com.app.taskmanager.exception.ForbiddenException;
+import com.app.taskmanager.exception.BadRequestException;
+import com.app.taskmanager.exception.ErrorCode;
+import com.app.taskmanager.exception.ResourceNotFoundException;
 import com.app.taskmanager.repository.TaskRepository;
 import com.app.taskmanager.repository.UserRepository;
 import com.app.taskmanager.service.TaskService;
@@ -30,6 +32,8 @@ import lombok.RequiredArgsConstructor;
 @Service
 @RequiredArgsConstructor
 public class TaskServiceImpl implements TaskService {
+
+    private static final List<String> ALLOWED_SORT_FIELDS = List.of("createdAt", "title", "status");
 
     private final TaskRepository taskRepository;
     private final UserRepository userRepository;
@@ -46,25 +50,35 @@ public class TaskServiceImpl implements TaskService {
                 .build();
     }
 
-    private Task getTaskForCurrentUser(Long taskId) {
+    private User getCurrentUser() {
         String email = SecurityUtil.getCurrentUserEmail();
-        User user = userRepository.findByEmail(email).orElseThrow(() -> new RuntimeException("User not found"));
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.USER_NOT_FOUND));
+    }
 
-        Task task = taskRepository.findById(taskId).orElseThrow(() -> new RuntimeException("Task not found"));
-
-        if (!task.getUser().getId().equals(user.getId())) {
-            // throw new RuntimeException("Access Denied!");
-            throw new ForbiddenException();
+    private Task getTaskForCurrentUser(Long taskId) {
+        User user = getCurrentUser();
+        Task task = taskRepository.findById(taskId).orElse(null);
+        // Treat "not yours" and "does not exist" identically so attackers
+        // cannot enumerate which task IDs are valid by status code alone.
+        if (task == null || !task.getUser().getId().equals(user.getId())) {
+            throw new ResourceNotFoundException(
+                    ErrorCode.TASK_NOT_FOUND,
+                    "Task with id '%d' not found".formatted(taskId));
         }
         return task;
-
     }
 
     private Status parseStatus(String status) {
+        if (status == null) {
+            return null;
+        }
         try {
             return Status.valueOf(status);
-        } catch (Exception e) {
-            throw new RuntimeException("Invalid status");
+        } catch (IllegalArgumentException e) {
+            throw new BadRequestException(ErrorCode.INVALID_STATUS,
+                    "Invalid status '%s'. Allowed values: %s".formatted(
+                            status, List.of(Status.values())));
         }
     }
 
@@ -80,13 +94,12 @@ public class TaskServiceImpl implements TaskService {
     @Override
     @Transactional
     public TaskResponse createTask(CreateTaskRequest request) {
-        String email = SecurityUtil.getCurrentUserEmail();
-        User user = userRepository.findByEmail(email).orElseThrow(() -> new RuntimeException("User not found"));
+        User user = getCurrentUser();
 
         Task task = Task.builder()
                 .title(request.getTitle())
                 .description(request.getDescription())
-                .status(Status.valueOf(request.getStatus()))
+                .status(parseStatus(request.getStatus()))
                 .createdAt(LocalDateTime.now())
                 .user(user)
                 .build();
@@ -95,51 +108,44 @@ public class TaskServiceImpl implements TaskService {
     }
 
     @Override
-
     public PaginateResponse<TaskResponse> getMyTasks(int page, int size, String sortBy, String status, String title) {
-
-        List<String> allowedSort = List.of("createdAt", "title", "status");
-
-        if (!allowedSort.contains(sortBy)) {
-            throw new RuntimeException("Invalid sort field");
+        if (!ALLOWED_SORT_FIELDS.contains(sortBy)) {
+            throw new BadRequestException(ErrorCode.INVALID_SORT_FIELD,
+                    "Invalid sort field '%s'. Allowed values: %s".formatted(sortBy, ALLOWED_SORT_FIELDS));
         }
+        // Validate status early so callers get a 400, not a 500 from the spec.
+        parseStatus(status);
 
-        String email = SecurityUtil.getCurrentUserEmail();
-
-        User user = userRepository.findByEmail(email).orElseThrow(() -> new RuntimeException("User not found"));
-
+        User user = getCurrentUser();
         Pageable pageable = PageRequest.of(page, size, Sort.by(sortBy).descending());
-        Page<Task> tasks;
 
         Specification<Task> spec = Specification.where(TaskSpecification.hasUserId(user.getId()))
-                .and(TaskSpecification.hasStatus(status)).and(TaskSpecification.hasTitle(title));
+                .and(TaskSpecification.hasStatus(status))
+                .and(TaskSpecification.hasTitle(title));
 
         Page<Task> result = taskRepository.findAll(spec, pageable);
         return mapToPageResponse(result);
-
     }
 
     @Override
+    @Transactional
     public TaskResponse updateTask(Long id, UpdateTaskRequest req) {
         Task task = getTaskForCurrentUser(id);
         if (req.getTitle() != null) {
-
-            task.setTitle((req.getTitle()));
+            task.setTitle(req.getTitle());
         }
         if (req.getDescription() != null) {
-
             task.setDescription(req.getDescription());
         }
         if (req.getStatus() != null) {
-
-            task.setStatus(Status.valueOf(req.getStatus()));
+            task.setStatus(parseStatus(req.getStatus()));
         }
-
         Task updated = taskRepository.save(task);
         return mapToResponse(updated);
     }
 
     @Override
+    @Transactional
     public void deleteTask(Long id) {
         Task task = getTaskForCurrentUser(id);
         taskRepository.delete(task);

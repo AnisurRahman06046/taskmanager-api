@@ -7,12 +7,18 @@ import lombok.Data;
 
 @Data
 public class RegisterRequest {
+
     @NotBlank
+    @Size(max = 100)
     private String name;
 
+    @NotBlank
     @Email
+    @Size(max = 254)
     private String email;
 
-    @Size(min=4)
+    // BCrypt silently truncates inputs longer than 72 bytes, so cap there.
+    @NotBlank
+    @Size(min = 8, max = 72)
     private String password;
 }

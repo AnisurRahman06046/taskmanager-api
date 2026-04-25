@@ -1,5 +1,7 @@
 package com.app.taskmanager.service;
 
+import java.util.Locale;
+
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -8,31 +10,46 @@ import com.app.taskmanager.dto.LoginRequest;
 import com.app.taskmanager.dto.RegisterRequest;
 import com.app.taskmanager.entity.Role;
 import com.app.taskmanager.entity.User;
+import com.app.taskmanager.exception.ConflictException;
+import com.app.taskmanager.exception.ErrorCode;
+import com.app.taskmanager.exception.UnauthorizedException;
 import com.app.taskmanager.repository.UserRepository;
 import com.app.taskmanager.util.JwtUtil;
 
-import lombok.RequiredArgsConstructor;
-
 @Service
-@RequiredArgsConstructor
 public class UserService {
+
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
 
-    // public UserService(UserRepository userRepository,PasswordEncoder
-    // passwordEncoder){
-    // this.userRepository=userRepository;
-    // this.passwordEncoder=passwordEncoder;
-    // }
+    /**
+     * Pre-computed BCrypt hash used as a decoy when a login is attempted
+     * against a non-existent email. Comparing the supplied password against
+     * this hash makes the missing-user path take the same time as the
+     * wrong-password path, closing the timing channel that otherwise leaks
+     * which emails are registered.
+     */
+    private final String dummyHash;
+
+    public UserService(UserRepository userRepository,
+                       PasswordEncoder passwordEncoder,
+                       JwtUtil jwtUtil) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtUtil = jwtUtil;
+        this.dummyHash = passwordEncoder.encode("dummy-password-for-timing-attack-prevention");
+    }
+
     public User register(RegisterRequest request) {
-        // check if email exists
-        if (userRepository.findByEmail(request.getEmail()).isPresent()) {
-            throw new RuntimeException("Email already exists");
+        String email = normalizeEmail(request.getEmail());
+        if (userRepository.findByEmail(email).isPresent()) {
+            throw new ConflictException(ErrorCode.EMAIL_ALREADY_EXISTS);
         }
 
-        User user = User.builder().name(request.getName())
-                .email(request.getEmail())
+        User user = User.builder()
+                .name(request.getName())
+                .email(email)
                 .password(passwordEncoder.encode(request.getPassword()))
                 .role(Role.USER)
                 .build();
@@ -41,14 +58,26 @@ public class UserService {
     }
 
     public AuthResponse login(LoginRequest req) {
-        User user = userRepository.findByEmail(req.getEmail())
-                .orElseThrow(() -> new RuntimeException("User not found"));
-        if (!passwordEncoder.matches(req.getPassword(), user.getPassword())) {
-            throw new RuntimeException("Invalid credentials");
+        String email = normalizeEmail(req.getEmail());
+        User user = userRepository.findByEmail(email).orElse(null);
+
+        // Always run a BCrypt comparison — against the real hash if the user
+        // exists, against a dummy hash otherwise — so timing does not reveal
+        // whether the email is registered.
+        String hashToCompare = user != null ? user.getPassword() : dummyHash;
+        boolean matches = passwordEncoder.matches(req.getPassword(), hashToCompare);
+
+        if (user == null || !matches) {
+            throw new UnauthorizedException(ErrorCode.INVALID_CREDENTIALS);
         }
+
         String token = jwtUtil.generateToken(user.getEmail());
         return AuthResponse.builder()
                 .accessToken(token)
                 .build();
+    }
+
+    private String normalizeEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase(Locale.ROOT);
     }
 }
